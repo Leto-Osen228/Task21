@@ -1,36 +1,51 @@
-#define ARGB_PIN 8
-#define SENSOR_PIN 4
+/*
+   Автор: Петров Александр Алексеевич
+   Дата: 30 Октября 2023
+
+   Для измерения был выбран датчик CO2 AGS10, но он оказадся не исправным.
+   Код написан для абстрактного сенсора, в роле которого выступил потенциометр.
+
+   В качестве экрана выступил графический дисплей разрешения 128*64 с контроллером ssd1606.
+   Для индикации использовался адресный RGB светодиод, установленный на плату.
+
+   Для упрощения кода использовались внешнии библиотеки.
+   
+   Тестировалось на отладочной плате ESP32-C3 AI.
+*/
+
+#define ARGB_PIN 8          // Пин адресного светодиода
+#define SENSOR_PIN 4        // Пин аналогового датчика
 #define BUZZER_PIN 10       // Пин пищалки 
 
 #define SDA_PIN 6           // Пин данных I2C
 #define SCL_PIN 7           // Пин тактирования I2C
 
-#define OK_BUTTON_PIN 1
-#define LEFT_BUTTON_PIN 3
-#define RIGHT_BUTTON_PIN 2
+#define OK_BUTTON_PIN 1     // Пин кнопки "ОК" (следующий пункт)
+#define LEFT_BUTTON_PIN 3   // Пин кнопки "LEFT" (меньше / выкл)
+#define RIGHT_BUTTON_PIN 2  // Пин кнопки "RIGHT" (больше / вкл)
 
+// Подключение библиотек, инициализация объекта дисплея
 #include <Wire.h>
 #include "GyverOLED.h"
 GyverOLED<SSD1306_128x64> oled;
 
+// Подключение библиотек, инициализация объектов кнопок
 #include "GyverButton.h"
 GButton ok_btn(OK_BUTTON_PIN);
 GButton left_btn(LEFT_BUTTON_PIN);
 GButton right_btn(RIGHT_BUTTON_PIN);
 
+// Подключение библиотек, инициализация объекта светодиода
 #include "FastLED.h"
 CRGB leds[1];
 
 // Перечисление состояний устройства
 typedef enum {
-  Error,
   Ok,
   Control,
   Critical
 } State;
 
-uint16_t value;
-State state;
 
 typedef struct Setting {
   // влючена ли писчалка
@@ -46,20 +61,25 @@ typedef struct Setting {
   bool gradient_led_display = 0;
 } Setting;
 
-Setting setting;
+uint16_t value;   // Текущий оровень газа в попугаях
+State state;      // Текущее состояние
+Setting setting;  // Структура с настройками
 
+/*
+    Функция содержащая основную логику работы устройства
+ */
 void task(void *pvParameters) {
   // Установка пинов в качестве выходов
   pinMode(BUZZER_PIN, OUTPUT);
 
+  // Установка разрешения АЦП на 12 бит
   analogReadResolution(12);
 
+  // Инициализация адреного светодиода, установка яркости ~40%
   FastLED.addLeds<WS2812B, ARGB_PIN, GRB>(leds, 1);
   FastLED.setBrightness(100);
   FastLED.clear();
 
-  Serial.begin(115200);
-  delay(1000);
   // Инициализация дисплея
   oled.init(SDA_PIN, SCL_PIN);
   oled.clear();
@@ -69,31 +89,34 @@ void task(void *pvParameters) {
     buzzerHandler();
   }
 }
+
 /*
    Функция обновления состояния.
    Принимает: ничего
-   Возвращает: состояние
-   Считывает значение, фильтрует, выводит в порт, определяет состояние
+   Возвращает: ничего
+   
+   Считывает и фильтрует значения, определяет состояние, устанавливает цвет индикатора.
 */
 void updateState() {
   static uint32_t timer;
   if (millis() - timer > 5) {
     uint16_t now_val = analogRead(SENSOR_PIN);
 
-    // фильтр низких частот
+    // Фильтр низких частот
     value += (now_val - value) / 10;
-
-    Serial.println(value);
 
     if (value < setting.medium_threshold) {
       state = Ok;
       leds[0] = CRGB::Green;
     } else if (value < setting.high_threshold) {
       state = Control;
+      // Если включен градиентовый режим
       if ( setting.gradient_led_display) {
+        // Индицировать градиент зелёный - красный
         uint8_t color = map(value, setting.medium_threshold, setting.high_threshold, 0, 255);
         leds[0] = CRGB(color, 255 - color, 0);
       } else {
+        // Иначе жёлтый
         leds[0] = CRGB::Yellow;
       }
     } else {
@@ -108,18 +131,21 @@ void updateState() {
    Функция работы с пользователем, вывод на дисплей, обработка нажатий.
    Принимает: ничего
    Возвращает: ничего
-   Писщит соответственно режиму.
+   
 */
 void display(void) {
   bool update_flag = 1;       // флаг обновления дисплея
-  int8_t step = 0;
-  static int8_t cursor = 0;
-  static State old_state;
+  int8_t step = 0;            // Переменная изменения параметров
+  static int8_t cursor = 0;   // Курсор меню
+  static State old_state;     // Старое состояние устройства
+
+  // Если состояние изменилось
   if (old_state != state) {
     old_state = state;
     update_flag = 1;
   }
 
+  // Обновление состояния кнопок
   ok_btn.tick();
   left_btn.tick();
   right_btn.tick();
@@ -135,7 +161,9 @@ void display(void) {
   if (left_btn.isStep())
     step -= 100;
 
+  // Если нужно изменить параметры
   if (step != 0) {
+    // Меняем порог изменения состояния или переключаем функции
     switch (cursor) {
       case 0:
         if (step > 0) setting.buzzer_en = true;
@@ -154,7 +182,9 @@ void display(void) {
     }
     update_flag = true;
   }
+  
   if (update_flag) {
+    // Обновление информации на дисплее
     oled.clear();
     switch (state) {
       case Ok:
@@ -188,7 +218,7 @@ void display(void) {
 
 /*
    Функция писка.
-   Принимает: состояние
+   Принимает: ничего
    Возвращает: ничего
    Писщит соответственно режиму.
 */
@@ -217,7 +247,8 @@ void buzzerHandler() {
 }
 
 void setup() {
-  xTaskCreateUniversal(task, "loopTask", 8192, NULL, 5, NULL, 1);
+  // Потребовалось создавать свою задач
+  xTaskCreateUniversal(task, "task", 8192, NULL, 5, NULL, 1);
 }
 
 void loop() {
